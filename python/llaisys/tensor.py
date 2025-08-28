@@ -69,8 +69,9 @@ class Tensor:
     def debug(self):
         LIB_LLAISYS.tensorDebug(self._tensor)
 
-    def __repr__(self):
-        return f"<Tensor shape={self.shape}, dtype={self.dtype}, device={self.device_type}:{self.device_id}>"
+    def __repr__(self) -> str:
+        shape_str = "x".join(map(str, self.shape()))
+        return f"Tensor({shape_str}, {self.dtype().name}, {self.device_type().name}:{self.device_id()})"
 
     def load(self, data: c_void_p):
         LIB_LLAISYS.tensorLoad(self._tensor, data)
@@ -78,18 +79,39 @@ class Tensor:
     def is_contiguous(self) -> bool:
         return bool(LIB_LLAISYS.tensorIsContiguous(self._tensor))
 
-    def view(self, *shape: int) -> llaisysTensor_t:
+    def view(self, *shape: int) -> 'Tensor':
+        """Create a new view of the tensor with the specified shape."""
+        if not shape:
+            raise ValueError("Shape cannot be empty")
         _shape = (c_size_t * len(shape))(*shape)
         return Tensor(
             tensor=LIB_LLAISYS.tensorView(self._tensor, _shape, c_size_t(len(shape)))
         )
+    
+    def reshape(self, *shape: int) -> 'Tensor':
+        """Reshape the tensor to the specified shape."""
+        if not shape:
+            raise ValueError("Shape cannot be empty")
+        _shape = (c_size_t * len(shape))(*shape)
+        return Tensor(
+            tensor=LIB_LLAISYS.tensorReshape(self._tensor, _shape, c_size_t(len(shape)))
+        )
 
-    def permute(self, *perm: int) -> llaisysTensor_t:
-        assert len(perm) == self.ndim()
+    def permute(self, *perm: int) -> 'Tensor':
+        """Permute the dimensions of the tensor."""
+        if len(perm) != self.ndim():
+            raise ValueError(f"Expected {self.ndim()} dimensions, got {len(perm)}")
+        if set(perm) != set(range(self.ndim())):
+            raise ValueError("Permutation must be a valid reordering of dimensions")
         _perm = (c_size_t * len(perm))(*perm)
         return Tensor(tensor=LIB_LLAISYS.tensorPermute(self._tensor, _perm))
 
-    def slice(self, dim: int, start: int, end: int):
+    def slice(self, dim: int, start: int, end: int) -> 'Tensor':
+        """Slice the tensor along the specified dimension."""
+        if dim < 0 or dim >= self.ndim():
+            raise ValueError(f"Dimension {dim} out of range for {self.ndim()}D tensor")
+        if start < 0 or end < start:
+            raise ValueError(f"Invalid slice range: start={start}, end={end}")
         return Tensor(
             tensor=LIB_LLAISYS.tensorSlice(
                 self._tensor, c_size_t(dim), c_size_t(start), c_size_t(end)
