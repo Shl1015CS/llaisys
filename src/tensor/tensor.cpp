@@ -164,130 +164,132 @@ void Tensor::debug() const {
 }
 
 bool Tensor::isContiguous() const {
-    // 空张量或单元素张量总是连续的
-    if (_meta.shape.empty() || numel() <= 1) {
-        return true;
+    ptrdiff_t expected_stride = 1;
+    for (int i = static_cast<int>(this->ndim()) - 1; i >= 0; i--) {
+        if (this->strides()[i] != expected_stride) {
+            return false;
+        }
+        expected_stride *= this->shape()[i];
     }
-    
-    // 计算预期的连续步长（行优先顺序）
-    std::vector<ptrdiff_t> expected_strides(_meta.shape.size());
-    ptrdiff_t stride = 1;
-    for (int i = static_cast<int>(_meta.shape.size()) - 1; i >= 0; i--) {
-        expected_strides[i] = stride;
-        stride *= _meta.shape[i];
-    }
-    
-    // 比较实际步长与期望步长
-    return _meta.strides == expected_strides;
+    return true;
 }
 
 tensor_t Tensor::permute(const std::vector<size_t> &order) const {
-    // 检查order的有效性
-    ASSERT(order.size() == _meta.shape.size(), "Permute: order size must match tensor dimensions");
-    
-    std::vector<bool> used(order.size(), false);
-    for (size_t i = 0; i < order.size(); i++) {
-        ASSERT(order[i] < order.size(), "Permute: invalid dimension index");
-        ASSERT(!used[order[i]], "Permute: duplicate dimension index");
-        used[order[i]] = true;
+    // Check order validity
+    if (order.size() != this->_meta.shape.size()) {
+        throw std::runtime_error("permute order size must match tensor dimensions");
     }
-    
-    // 根据order重新排列形状和步长
-    TensorMeta new_meta;
-    new_meta.dtype = _meta.dtype;
-    new_meta.shape.resize(order.size());
-    new_meta.strides.resize(order.size());
-    
-    for (size_t i = 0; i < order.size(); i++) {
-        new_meta.shape[i] = _meta.shape[order[i]];
-        new_meta.strides[i] = _meta.strides[order[i]];
+    std::vector<bool> seen(order.size(), false);
+    for (auto idx : order) {
+        if (idx >= order.size() || seen[idx]) {
+            throw std::runtime_error("permute order is invalid");
+        }
+        seen[idx] = true;
     }
-    
-    return std::shared_ptr<Tensor>(new Tensor(new_meta, _storage, _offset));
+    // Construct new tensor meta
+    std::vector<size_t> new_shape(order.size());
+    std::vector<ptrdiff_t> new_strides(order.size());
+    for (size_t i = 0; i < order.size(); ++i) {
+        new_shape[i] = _meta.shape[order[i]];
+        new_strides[i] = _meta.strides[order[i]];
+    }
+    TensorMeta new_meta = _meta;
+    new_meta.shape = std::move(new_shape);
+    new_meta.strides = std::move(new_strides);
+    // Create new tensor, share storage
+    return std::shared_ptr<Tensor>(new Tensor(new_meta, _storage, this->_offset));
 }
 
 tensor_t Tensor::view(const std::vector<size_t> &shape) const {
-    // 计算新形状的元素总数
+    // Check contiguous and shape compatibility
+    if (!this->isContiguous()) {
+        throw std::runtime_error("view() requires contiguous tensor");
+    }
     size_t new_numel = 1;
-    for (size_t dim : shape) {
+    for (auto dim : shape) {
         new_numel *= dim;
     }
-    
-    // 检查元素总数是否一致
-    ASSERT(new_numel == this->numel(), "View: total number of elements must be preserved");
-    
-    // 检查原张量是否连续，非连续张量不能直接view
-    ASSERT(this->isContiguous(), "View: tensor must be contiguous");
-    
-    // 为新形状计算连续步长
-    TensorMeta new_meta;
-    new_meta.dtype = _meta.dtype;
-    new_meta.shape = shape;
-    new_meta.strides.resize(shape.size());
-    
-    if (!shape.empty()) {
-        ptrdiff_t stride = 1;
-        for (int i = static_cast<int>(shape.size()) - 1; i >= 0; i--) {
-            new_meta.strides[i] = stride;
-            stride *= shape[i];
-        }
+    if (new_numel != this->numel()) {
+        throw std::runtime_error("view() shape is incompatible with number of elements");
     }
-    
-    return std::shared_ptr<Tensor>(new Tensor(new_meta, _storage, _offset));
+    // Construct new tensor meta
+    std::vector<ptrdiff_t> new_strides(shape.size());
+    size_t stride = 1;
+    for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
+        new_strides[i] = stride;
+        stride *= shape[i];
+    }
+    TensorMeta new_meta = this->_meta;
+    new_meta.shape = shape;
+    new_meta.strides = new_strides;
+    // Create new tensor, share storage
+    return std::shared_ptr<Tensor>(new Tensor(new_meta, this->_storage, this->_offset));
 }
 
 tensor_t Tensor::slice(size_t dim, size_t start, size_t end) const {
-    // 检查维度索引有效性
-    ASSERT(dim < _meta.shape.size(), "Slice: dimension index out of bounds");
-    
-    // 检查切片范围有效性
-    ASSERT(start <= end, "Slice: start index must be <= end index");
-    ASSERT(end <= _meta.shape[dim], "Slice: end index out of bounds");
-    
-    // 计算新的形状
-    TensorMeta new_meta = _meta;  // 复制原始元数据
-    new_meta.shape[dim] = end - start;  // 只更新被切片维度的大小
-    
-    // 计算新的偏移量
-    size_t new_offset = _offset + start * _meta.strides[dim] * elementSize();
-    
+    // Note: range is [start, end)
+    // Check dim, start, and end validity
+    if (dim >= this->_meta.shape.size()) {
+        throw std::runtime_error("slice: dim out of range");
+    }
+    if (start > end || end > this->_meta.shape[dim]) {
+        throw std::runtime_error("slice: invalid start or end");
+    }
+    // Construct new tensor meta
+    std::vector<size_t> new_shape = this->_meta.shape;
+    new_shape[dim] = end - start;
+    std::vector<ptrdiff_t> new_strides = this->_meta.strides;
+    size_t new_offset = this->_offset + start * new_strides[dim] * this->elementSize();
+    TensorMeta new_meta = this->_meta;
+    new_meta.shape = std::move(new_shape);
+    new_meta.strides = std::move(new_strides);
+    // Create new tensor, share storage
     return std::shared_ptr<Tensor>(new Tensor(new_meta, _storage, new_offset));
 }
 
 void Tensor::load(const void *src_) {
-    core::context().setDevice(this->deviceType(), this->deviceId());
-    size_t total_bytes = this->numel() * this->elementSize();
-    
-    if (this->deviceType() == LLAISYS_DEVICE_CPU) {
-        // 对于CPU设备，直接使用内存复制
-        core::context().runtime().api()->memcpy_sync(
-            this->data(),
-            src_,
-            total_bytes,
-            LLAISYS_MEMCPY_H2H);
-    } else {
-        // 对于其他设备，使用主机到设备的内存复制
-        core::context().runtime().api()->memcpy_sync(
-            this->data(),
-            src_,
-            total_bytes,
-            LLAISYS_MEMCPY_H2D);
-    }
+    core::context().runtime().api()->memcpy_sync(
+        this->data(),
+        (void *) src_,
+        this->numel() * this->elementSize(),
+        LLAISYS_MEMCPY_H2D);
 }
 
 tensor_t Tensor::contiguous() const {
     TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage, this->_offset));
 }
 
 tensor_t Tensor::reshape(const std::vector<size_t> &shape) const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    // Check contiguous and shape compatibility
+    if (!this->isContiguous()) {
+        throw std::runtime_error("Reshape failed: tensor must be contiguous");
+    }    
+    size_t new_numel = 1;
+    for (auto d : shape) new_numel *= d;
+    if (this->numel() != new_numel) {
+        throw std::runtime_error("Reshape failed: total number of elements must not change");
+    }
+
+    // Calculate new strides
+    std::vector<ptrdiff_t> new_strides(shape.size());
+    if (!shape.empty()) {
+        new_strides.back() = 1;
+        for (int i = static_cast<int>(shape.size()) - 2; i >= 0; --i) {
+            new_strides[i] = new_strides[i + 1] * shape[i + 1];
+        }
+    }
+
+    // Construct new tensor meta
+    TensorMeta new_meta = this->_meta;
+    new_meta.shape = std::move(shape);
+    new_meta.strides = std::move(new_strides);
+    return std::shared_ptr<Tensor>(new Tensor(new_meta, _storage, this->_offset));
 }
 
 tensor_t Tensor::to(llaisysDeviceType_t device_type, int device) const {
     TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage, this->_offset));
 }
 
 } // namespace llaisys
